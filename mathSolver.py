@@ -142,8 +142,18 @@ import cv2 as cv
 import mediapipe as mp
 import numpy as np
 import time
+import av
+
+from streamlit_webrtc import (
+    webrtc_streamer,
+    VideoProcessorBase,
+    WebRtcMode,
+    RTCConfiguration,
+)
+
 
 # ---------------- PAGE CONFIG ----------------
+
 st.set_page_config(
     page_title="Gesture Based Math Solver",
     page_icon="✋",
@@ -151,23 +161,16 @@ st.set_page_config(
 )
 
 st.title("✋ Gesture Based Math Solver")
-st.write("Use your hand gestures to create mathematical expressions.")
-
-# ---------------- MEDIAPIPE ----------------
-mp_drawing = mp.solutions.drawing_utils
-mp_hands = mp.solutions.hands
+st.write("Real-Time Gesture Based Mathematical Expression Solver")
 
 
-@st.cache_resource
-def get_hands():
-    return mp_hands.Hands(
-        max_num_hands=2,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.7
-    )
+# ---------------- SESSION STATE ----------------
 
+if "expression" not in st.session_state:
+    st.session_state.expression = ""
 
-hands = get_hands()
+if "result" not in st.session_state:
+    st.session_state.result = ""
 
 
 # ---------------- FUNCTIONS ----------------
@@ -187,29 +190,32 @@ def count_fingers(hand_landmarks, label):
     # Thumb
     if label == "Left":
         fingers.append(
-            1 if hand_landmarks.landmark[tip_ids[0]].x >
-            hand_landmarks.landmark[tip_ids[0] - 1].x
+            1 if hand_landmarks.landmark[4].x >
+            hand_landmarks.landmark[3].x
             else 0
         )
     else:
         fingers.append(
-            1 if hand_landmarks.landmark[tip_ids[0]].x <
-            hand_landmarks.landmark[tip_ids[0] - 1].x
+            1 if hand_landmarks.landmark[4].x <
+            hand_landmarks.landmark[3].x
             else 0
         )
 
     # Other fingers
     for ids in range(1, 5):
+
         if hand_landmarks.landmark[tip_ids[ids]].y < \
                 hand_landmarks.landmark[tip_ids[ids] - 2].y:
+
             fingers.append(1)
+
         else:
             fingers.append(0)
 
     return fingers.count(1)
 
 
-def detectGesture(hand1_data, hand2_data):
+def detect_gesture(hand1_data, hand2_data):
 
     (hand1, label1), (hand2, label2) = hand1_data, hand2_data
 
@@ -222,8 +228,10 @@ def detectGesture(hand1_data, hand2_data):
     )
 
     if f1 == 1 and f2 == 1:
+
         if dist < 0.06:
             return "exit"
+
         return "+"
 
     elif (f1 == 1 and f2 == 2) or (f1 == 2 and f2 == 1):
@@ -259,202 +267,230 @@ def detectGesture(hand1_data, hand2_data):
     return None
 
 
-# ---------------- SESSION STATE ----------------
+# ---------------- VIDEO PROCESSOR ----------------
 
-if "expression" not in st.session_state:
-    st.session_state.expression = ""
+class GestureProcessor(VideoProcessorBase):
 
-if "result" not in st.session_state:
-    st.session_state.result = ""
+    def __init__(self):
+
+        self.mp_hands = mp.solutions.hands
+        self.mp_drawing = mp.solutions.drawing_utils
+
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=2,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
+
+        self.expression = ""
+        self.result_text = ""
+
+        self.last_update_time = 0
+        self.delay = 1.25
+
+
+    def recv(self, frame):
+
+        image = frame.to_ndarray(format="bgr24")
+
+        # Mirror image
+        image = cv.flip(image, 1)
+
+        img_rgb = cv.cvtColor(
+            image,
+            cv.COLOR_BGR2RGB
+        )
+
+        result = self.hands.process(img_rgb)
+
+        current_time = time.time()
+
+        hand_data = []
+
+        if (
+            result.multi_hand_landmarks
+            and result.multi_handedness
+        ):
+
+            for hand_landmarks, hand_handedness in zip(
+                result.multi_hand_landmarks,
+                result.multi_handedness
+            ):
+
+                label = hand_handedness.classification[0].label
+
+                hand_data.append(
+                    (hand_landmarks, label)
+                )
+
+                self.mp_drawing.draw_landmarks(
+                    image,
+                    hand_landmarks,
+                    self.mp_hands.HAND_CONNECTIONS
+                )
+
+
+            # -------- ONE HAND --------
+
+            if len(hand_data) == 1:
+
+                hand_landmarks, label = hand_data[0]
+
+                fingers_up = count_fingers(
+                    hand_landmarks,
+                    label
+                )
+
+                if (
+                    fingers_up in [0, 1, 2, 3, 4, 5]
+                    and current_time - self.last_update_time > self.delay
+                ):
+
+                    self.expression += str(fingers_up)
+
+                    self.last_update_time = current_time
+
+
+            # -------- TWO HANDS --------
+
+            elif len(hand_data) == 2:
+
+                gesture = detect_gesture(
+                    hand_data[0],
+                    hand_data[1]
+                )
+
+                if (
+                    gesture
+                    and current_time - self.last_update_time > self.delay
+                ):
+
+                    if gesture == "clear":
+
+                        self.expression = ""
+                        self.result_text = ""
+
+
+                    elif gesture == "del":
+
+                        self.expression = self.expression[:-1]
+
+
+                    elif gesture == "=":
+
+                        try:
+                            self.result_text = str(
+                                eval(self.expression)
+                            )
+
+                        except Exception:
+                            self.result_text = "Error"
+
+
+                    elif gesture == "exit":
+
+                        pass
+
+
+                    else:
+
+                        self.expression += gesture
+
+
+                    self.last_update_time = current_time
+
+
+        # -------- DISPLAY TEXT --------
+
+        cv.putText(
+            image,
+            f"Expr: {self.expression}",
+            (20, 50),
+            cv.FONT_HERSHEY_SIMPLEX,
+            1,
+            (255, 0, 0),
+            2
+        )
+
+        cv.putText(
+            image,
+            f"Result: {self.result_text}",
+            (20, 100),
+            cv.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 0, 255),
+            2
+        )
+
+        return av.VideoFrame.from_ndarray(
+            image,
+            format="bgr24"
+        )
+
+
+# ---------------- WEBRTC CONFIG ----------------
+
+RTC_CONFIGURATION = RTCConfiguration(
+    {
+        "iceServers": [
+            {
+                "urls": [
+                    "stun:stun.l.google.com:19302"
+                ]
+            }
+        ]
+    }
+)
 
 
 # ---------------- UI ----------------
 
-col1, col2 = st.columns(2)
+st.subheader("📷 Live Camera")
 
-with col1:
-    st.subheader("Expression")
-    st.info(st.session_state.expression)
-
-with col2:
-    st.subheader("Result")
-    st.success(st.session_state.result)
-
-
-# ---------------- BUTTONS ----------------
-
-button_col1, button_col2 = st.columns(2)
-
-with button_col1:
-    if st.button("🗑 Clear Expression"):
-        st.session_state.expression = ""
-        st.session_state.result = ""
-        st.rerun()
-
-with button_col2:
-    if st.button("🧮 Calculate"):
-        try:
-            st.session_state.result = str(
-                eval(st.session_state.expression)
-            )
-        except:
-            st.session_state.result = "Error"
-
-        st.rerun()
-
-
-st.divider()
-
-st.subheader("📷 Camera")
-
-camera_image = st.camera_input(
-    "Show your hand gesture to the camera"
+ctx = webrtc_streamer(
+    key="gesture-math-solver",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIGURATION,
+    video_processor_factory=GestureProcessor,
+    media_stream_constraints={
+        "video": True,
+        "audio": False,
+    },
+    async_processing=True,
 )
 
 
-# ---------------- PROCESS IMAGE ----------------
+# ---------------- CONTROLS ----------------
 
-if camera_image is not None:
+st.divider()
 
-    file_bytes = np.asarray(
-        bytearray(camera_image.read()),
-        dtype=np.uint8
-    )
+col1, col2 = st.columns(2)
 
-    image = cv.imdecode(
-        file_bytes,
-        cv.IMREAD_COLOR
-    )
+with col1:
 
-    image = cv.flip(image, 1)
+    if st.button("🗑 Clear Expression"):
 
-    img_rgb = cv.cvtColor(
-        image,
-        cv.COLOR_BGR2RGB
-    )
+        if ctx.video_processor:
 
-    result = hands.process(img_rgb)
-
-    hand_data = []
-
-    if (
-        result.multi_hand_landmarks
-        and result.multi_handedness
-    ):
-
-        for hand_landmarks, hand_handedness in zip(
-            result.multi_hand_landmarks,
-            result.multi_handedness
-        ):
-
-            label = hand_handedness.classification[0].label
-
-            hand_data.append(
-                (hand_landmarks, label)
-            )
-
-            mp_drawing.draw_landmarks(
-                image,
-                hand_landmarks,
-                mp_hands.HAND_CONNECTIONS
-            )
+            ctx.video_processor.expression = ""
+            ctx.video_processor.result_text = ""
 
 
-        # -------- ONE HAND --------
+with col2:
 
-        if len(hand_data) == 1:
+    if st.button("🧮 Calculate"):
 
-            hand_landmarks, label = hand_data[0]
+        if ctx.video_processor:
 
-            fingers_up = count_fingers(
-                hand_landmarks,
-                label
-            )
+            try:
 
-            if fingers_up in [0, 1, 2, 3, 4, 5]:
-
-                st.session_state.expression += str(
-                    fingers_up
+                ctx.video_processor.result_text = str(
+                    eval(ctx.video_processor.expression)
                 )
 
-                st.success(
-                    f"Detected Number: {fingers_up}"
-                )
+            except Exception:
 
-
-        # -------- TWO HANDS --------
-
-        elif len(hand_data) == 2:
-
-            gesture = detectGesture(
-                hand_data[0],
-                hand_data[1]
-            )
-
-            if gesture == "clear":
-
-                st.session_state.expression = ""
-                st.session_state.result = ""
-
-                st.success("Expression Cleared")
-
-
-            elif gesture == "del":
-
-                st.session_state.expression = \
-                    st.session_state.expression[:-1]
-
-                st.success("Last Character Deleted")
-
-
-            elif gesture == "=":
-
-                try:
-                    st.session_state.result = str(
-                        eval(
-                            st.session_state.expression
-                        )
-                    )
-
-                except:
-                    st.session_state.result = "Error"
-
-                st.success(
-                    f"Result: {st.session_state.result}"
-                )
-
-
-            elif gesture == "exit":
-
-                st.warning("Gesture session stopped")
-
-
-            elif gesture:
-
-                st.session_state.expression += gesture
-
-                st.success(
-                    f"Detected: {gesture}"
-                )
-
-
-    else:
-
-        st.warning("No hands detected")
-
-
-    # Display processed image
-
-    image_rgb = cv.cvtColor(
-        image,
-        cv.COLOR_BGR2RGB
-    )
-
-    st.image(
-        image_rgb,
-        caption="Processed Image",
-        use_container_width=True
-    )
+                ctx.video_processor.result_text = "Error"
 
 
 # ---------------- INSTRUCTIONS ----------------
