@@ -436,20 +436,23 @@ class GestureProcessor(VideoProcessorBase):
 #--------------------------------------------------------------
 #                Configuration + streamer       
 
-RTC_CONFIGURATION = RTCConfiguration(
-    {
-        "iceServers": [
-            {
-                "urls": [
-                    "stun:stun.l.google.com:19302"
-                ]
-            }
-        ]
-    }
-)
-
 st.subheader("📷 Live Camera")
 
+@st.cache_data
+def get_ice_servers():
+    account_sid = os.environ["TWILIO_ACCOUNT_SID"]
+    auth_token = os.environ["TWILIO_AUTH_TOKEN"]
+
+    client = Client(account_sid, auth_token)
+
+    token = client.tokens.create()
+
+    return token.ice_servers
+
+RTC_CONFIGURATION = {
+    "iceServers": get_ice_servers()
+}
+    
 ctx = webrtc_streamer(
     key="gesture-math-solver",
     mode=WebRtcMode.SENDRECV,
