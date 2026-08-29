@@ -147,8 +147,7 @@ import av
 from streamlit_webrtc import (
     webrtc_streamer,
     VideoProcessorBase,
-    WebRtcMode,
-    RTCConfiguration,
+   
 )
 
 
@@ -430,17 +429,7 @@ class GestureProcessor(VideoProcessorBase):
 
 # ---------------- WEBRTC CONFIG ----------------
 
-RTC_CONFIGURATION = RTCConfiguration(
-    {
-        "iceServers": [
-            {
-                "urls": [
-                    "stun:stun.l.google.com:19302"
-                ]
-            }
-        ]
-    }
-)
+
 
 
 # ---------------- UI ----------------
@@ -449,8 +438,6 @@ st.subheader("📷 Live Camera")
 
 ctx = webrtc_streamer(
     key="gesture-math-solver",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration=RTC_CONFIGURATION,
     video_processor_factory=GestureProcessor,
     media_stream_constraints={
         "video": True,
@@ -458,7 +445,6 @@ ctx = webrtc_streamer(
     },
     async_processing=True,
 )
-
 
 # ---------------- CONTROLS ----------------
 
